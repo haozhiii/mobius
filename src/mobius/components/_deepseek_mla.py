@@ -230,6 +230,9 @@ class DeepSeekMLA(nn.Module):
         # Flatten back to 3D for Attention op
         query_states = op.Reshape(query_4d, [0, 0, -1])
         key_states = op.Reshape(key_4d, [0, 0, -1])
+        # Llama-4 position-dependent query scaling (Mistral4), (B, S, 1).
+        if len(position_embeddings) > 2:
+            query_states = op.Mul(query_states, position_embeddings[2])
 
         # --- Attention ---
         # Note: qk_head_dim (192) != v_head_dim (128).

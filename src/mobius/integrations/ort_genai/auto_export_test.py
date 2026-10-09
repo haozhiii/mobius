@@ -486,6 +486,33 @@ class TestWriteProcessorConfig:
         permute = transforms[4]["operation"]["attrs"]
         assert permute["dims"] == [2, 0, 1]
 
+    def test_pixtral_longest_edge_is_a_side_length(self, tmp_path):
+        """HF Pixtral size={"longest_edge": 1540} must not cap the area at 1540 px."""
+        vision = mock.MagicMock()
+        vision.image_size = 1540
+        vision.patch_size = 14
+        vision.spatial_merge_size = 2
+        vision.model_type = "pixtral"
+        config = mock.MagicMock()
+        config.vision = vision
+        config.spatial_merge_size = 2
+        config.model_type = "mistral3"
+        hf_proc = mock.MagicMock()
+        hf_proc.image_processor.size = {"longest_edge": 1540}
+        hf_proc.image_processor.image_mean = [0.48145466, 0.4578275, 0.40821073]
+        hf_proc.image_processor.image_std = [0.26862954, 0.26130258, 0.27577711]
+        hf_proc.image_processor.rescale_factor = 1 / 255
+        hf_proc.image_processor.resample = 3
+
+        with mock.patch("transformers.AutoProcessor.from_pretrained", return_value=hf_proc):
+            path = _write_vision_processor_config(
+                config, str(tmp_path), hf_model_id="mistralai/Mistral-Small-4-119B-2603"
+            )
+        with open(path) as f:
+            resize = json.load(f)["processor"]["transforms"][1]["operation"]["attrs"]
+        assert resize["height"] == resize["width"] == 1540
+        assert resize["max_pixels"] == 1540 * 1540
+
     def test_muse_glimmer_uses_packed_qwen_image_pipeline(self, tmp_path):
         """Muse vision consumes flattened patches and image grid dimensions.
 

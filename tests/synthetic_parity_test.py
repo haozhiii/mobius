@@ -554,8 +554,21 @@ def _adapt_hy_v3_config(hf_kwargs: dict) -> None:
         hf_kwargs.pop(field, None)
 
 
+def _adapt_mistral4_config(hf_kwargs: dict) -> None:
+    """Fold Mobius' flat YaRN + Llama-4 scaling fields into HF rope_parameters."""
+    hf_kwargs["rope_parameters"] = {
+        "rope_type": hf_kwargs.pop("rope_type"),
+        "rope_theta": hf_kwargs.pop("rope_theta", 10_000.0),
+        "partial_rotary_factor": hf_kwargs.pop("partial_rotary_factor"),
+        **hf_kwargs.pop("rope_scaling"),
+    }
+    for field in ("head_dim", "scoring_func", "topk_method"):
+        hf_kwargs.pop(field, None)
+
+
 _HF_CONFIG_ADAPTERS = {
     "hy_v3": _adapt_hy_v3_config,
+    "mistral4": _adapt_mistral4_config,
     "muse_glimmer_text": _adapt_muse_glimmer_text_config,
     "qwen4_exp_text": _adapt_qwen4_exp_text_config,
 }
@@ -746,6 +759,7 @@ def _create_hf_config(model_type: str, config_overrides: dict):
         # DeepSeek V2/V3 use n_routed_experts (not num_local_experts)
         "deepseek_v2": {"num_local_experts": "n_routed_experts"},
         "deepseek_v3": {"num_local_experts": "n_routed_experts"},
+        "mistral4": {"num_local_experts": "n_routed_experts"},
         # dots1 uses n_routed_experts like DeepSeek V3
         "dots1": {"num_local_experts": "n_routed_experts"},
         # LongCat Flash uses n_routed_experts, moe_topk, and expert_ffn_hidden_size
@@ -810,8 +824,17 @@ def _create_softcapped_backbone_causal_lm(hf_config):
     return _SoftcappedBackboneCausalLM()
 
 
+def _create_mistral4_causal_lm(hf_config):
+    # Transformers ships Mistral4ForCausalLM but only maps mistral4 as the
+    # text config of Mistral3ForConditionalGeneration.
+    from transformers import Mistral4ForCausalLM
+
+    return Mistral4ForCausalLM(hf_config)
+
+
 _HF_MODEL_FACTORIES = {
     "muse_glimmer_text": _create_softcapped_backbone_causal_lm,
+    "mistral4": _create_mistral4_causal_lm,
 }
 
 

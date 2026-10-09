@@ -40,6 +40,7 @@ from mobius.components import (
     VisionModel,
 )
 from mobius.models.base import TextModel, effective_tie_word_embeddings
+from mobius.models.mistral4 import Mistral4VLDecoderModel
 
 if TYPE_CHECKING:
     import onnx_ir as ir
@@ -239,7 +240,13 @@ class LLaVAModel(nn.Module):
     def __init__(self, config: ArchitectureConfig):
         super().__init__()
         self.config = config
-        self.decoder = _LLaVADecoderModel(config)
+        # Mistral-Small-4 wraps an MLA + MoE ``mistral4`` text model.
+        self._is_mistral4_text = config.model_type == "mistral4"
+        self.decoder = (
+            Mistral4VLDecoderModel(config)
+            if self._is_mistral4_text
+            else _LLaVADecoderModel(config)
+        )
         # Dispatch: use Pixtral vision encoder for pixtral-based models,
         # CLIP/SigLIP for everything else.
         self._is_pixtral = (
@@ -265,11 +272,14 @@ class LLaVAModel(nn.Module):
         # ``language_model.`` — strip it so the decoder/embedding
         # sub-models can find their weights.
         if self._is_pixtral:
-            return _preprocess_pixtral_weights(
+            renamed = _preprocess_pixtral_weights(
                 state_dict,
                 tie_word_embeddings,
                 component_quantization=self.config.component_quantization is not None,
             )
+            if self._is_mistral4_text:
+                renamed = _preprocess_mistral4_decoder_weights(self.decoder, renamed)
+            return renamed
         if self.config.component_quantization is not None:
             return _preprocess_llava_component_weights(
                 state_dict,
@@ -336,6 +346,21 @@ def _preprocess_pixtral_weights(
         elif k == "lm_head.weight" or k.startswith("lm_head."):
             renamed[f"decoder.{k}"] = value
     return renamed
+
+
+def _preprocess_mistral4_decoder_weights(
+    decoder: Mistral4VLDecoderModel,
+    state_dict: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    """Apply the DeepSeek MLA/MoE weight mapping to the ``decoder.`` subset."""
+    prefix = "decoder."
+    decoder_weights = {
+        key[len(prefix) :]: value for key, value in state_dict.items() if key.startswith(prefix)
+    }
+    result = {key: value for key, value in state_dict.items() if not key.startswith(prefix)}
+    for key, value in decoder.preprocess_weights(decoder_weights).items():
+        result[f"{prefix}{key}"] = value
+    return result
 
 
 def _preprocess_llava_component_weights(

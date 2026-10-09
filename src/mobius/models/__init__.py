@@ -72,7 +72,9 @@ __all__ = [
     "GemmaCausalLMModel",
     "GemmaEmbeddingGGUFModel",
     "MiniMaxM2GGUFCausalLMModel",
+    "Mistral4CausalLMModel",
     "Mistral4GGUFCausalLMModel",
+    "Mistral4VLDecoderModel",
     "Glm4CausalLMModel",
     "GlmAsrForConditionalGeneration",
     "Glm4MoECausalLMModel",
@@ -342,6 +344,7 @@ from mobius.models.minimax_music3 import (
     MiniMaxMusic3Transformer1DModel,
     MiniMaxMusic3Vocoder,
 )
+from mobius.models.mistral4 import Mistral4CausalLMModel, Mistral4VLDecoderModel
 from mobius.models.moe import (
     ArcticGGUFCausalLMModel,
     DbrxGGUFCausalLMModel,

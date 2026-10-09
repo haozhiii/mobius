@@ -117,6 +117,7 @@ from mobius.models import (
     MageVLForConditionalGeneration,
     MaincoderCausalLMModel,
     MiniMaxM2GGUFCausalLMModel,
+    Mistral4CausalLMModel,
     Mistral4GGUFCausalLMModel,
     MoECausalLMModel,
     MoonshineForConditionalGeneration,
@@ -783,6 +784,7 @@ _REGISTRATIONS: dict[str, ModelRegistration] = {
     "deepseek_v3": ModelRegistration(DeepSeekV3CausalLMModel),
     "deepseek_v4": ModelRegistration(DeepSeekV4CausalLMModel, task="deepseek-v4"),
     "deepseek_vl_v2": ModelRegistration(DeepSeekOCR2CausalLMModel),
+    "mistral4": ModelRegistration(Mistral4CausalLMModel),
     # --- GLM-5.2 (MLA + DeepSeek Sparse Attention (DSA) + MoE) ---
     "glm_moe_dsa": ModelRegistration(GlmMoeDsaCausalLMModel, task="glm-moe-dsa"),
     # --- SSM (Mamba / Mamba2) ---
@@ -1635,6 +1637,7 @@ _FAMILY_OVERRIDES: dict[str, str] = {
     "mllama": "llama",
     "mistral": "mistral",
     "mistral3": "mistral",
+    "mistral4": "mistral",
     "ministral": "mistral",
     "ministral3": "mistral",
     "mixtral": "mistral",
@@ -1694,6 +1697,7 @@ _VARIANT_LABELS: dict[str, str] = {
     "deepseek_v2": "mla",
     "deepseek_v2_moe": "mla+moe",
     "deepseek_v3": "mla+moe",
+    "mistral4": "mla+moe",
     "deepseek_v4": "dense-csa-fallback+mtp+moe+hc",
     "glm_moe_dsa": "mla+dsa-indexshare+full-attention-fallback+moe",
     "phi3small": "blocksparse",

@@ -895,6 +895,47 @@ CAUSAL_LM_CONFIGS: list[tuple[str, dict, bool]] = [
         },
         True,
     ),
+    # mistral4 (mistralai/Mistral-Small-4-119B-2603 text model): DeepSeek-V3
+    # MLA + shared expert, but softmax routing without groups, every layer MoE,
+    # HF's partial_rotary_factor relative to head_dim, and Llama-4 query scaling.
+    (
+        "mistral4",
+        {
+            "num_key_value_heads": TINY_HEADS,
+            "q_lora_rank": 32,
+            "kv_lora_rank": 16,
+            "qk_nope_head_dim": 8,
+            "qk_rope_head_dim": 8,
+            "v_head_dim": 16,
+            "head_dim": 16,
+            "partial_rotary_factor": 0.5,
+            "num_local_experts": 4,
+            "num_experts_per_tok": 2,
+            "moe_intermediate_size": 32,
+            "n_group": 1,
+            "topk_group": 1,
+            "routed_scaling_factor": 1.0,
+            "norm_topk_prob": True,
+            "scoring_func": "softmax",
+            "topk_method": "greedy",
+            "first_k_dense_replace": 0,
+            "n_shared_experts": 1,
+            "rope_interleave": True,
+            "rope_type": "yarn",
+            "rope_scaling": {
+                "factor": 4.0,
+                "beta_fast": 32,
+                "beta_slow": 1,
+                "mscale": 1.0,
+                "mscale_all_dim": 1.0,
+                # Small so that floor(pos / original) > 0 within the 3-token
+                # parity prefill and the Llama-4 query scaling is exercised.
+                "original_max_position_embeddings": 2,
+                "llama_4_scaling_beta": 0.1,
+            },
+        },
+        True,
+    ),
     # glm_moe_dsa (zai-org/GLM-5.2): DeepSeekV3CausalLMModel subclass adding
     # DeepSeek Sparse Attention (DSA) indexers on top of MLA. Field values
     # below are shape-shrunk from the real zai-org/GLM-5.2 config.json

@@ -388,6 +388,14 @@ def _dequantize_fp8_tensor(
     scale = scale.to(target_dtype)
     if scale.ndim == 0:
         return weight.to(target_dtype) * scale
+    if (
+        weight.ndim == 3
+        and scale.ndim == 3
+        and scale.shape[0] == weight.shape[0]
+        and scale.shape[1:] == (1, 1)
+    ):
+        # Fused expert-major banks (Mistral-Small-4): one scalar per expert.
+        return weight.to(target_dtype) * scale
     if scale.ndim != 2:
         raise ValueError(
             f"FP8 weight '{name}' has scale with shape {tuple(scale.shape)}; "
@@ -470,7 +478,18 @@ def _dequantize_fp8_weights(state_dict: dict[str, torch.Tensor]) -> dict[str, to
 
     # Remove auxiliary FP8 tensors (not needed in the ONNX graph)
     aux_suffixes = (".weight_scale_inv", ".activation_scale", ".input_scale")
-    return {k: v for k, v in result.items() if not any(k.endswith(s) for s in aux_suffixes)}
+    # Fused parameters (e.g. ``experts.gate_up_proj``) carry underscore sidecars.
+    fused_aux = {
+        f"{key}{suffix}"
+        for key in fp8_keys
+        if not key.endswith(".weight")
+        for suffix in ("_scale_inv", "_activation_scale")
+    }
+    return {
+        k: v
+        for k, v in result.items()
+        if k not in fused_aux and not any(k.endswith(s) for s in aux_suffixes)
+    }
 
 
 def _resolve_shard_paths(model_id: str, revision: str | None = None) -> list[str]:

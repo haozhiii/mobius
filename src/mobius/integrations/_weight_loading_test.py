@@ -888,6 +888,24 @@ class TestDequantizeFP8Weights:
         result = _dequantize_fp8_weights(state_dict)
         assert "proj.activation_scale" not in result
 
+    def test_fused_expert_bank_per_expert_scale(self):
+        """Mistral-Small-4 fused experts carry one [E, 1, 1] scale per expert."""
+        from mobius.integrations._weight_loading import _dequantize_fp8_weights
+
+        bank = torch.tensor(
+            [[[1.0, 2.0], [-1.0, 0.5]], [[4.0, -2.0], [0.25, 1.0]]], dtype=torch.float32
+        ).to(torch.float8_e4m3fn)
+        scale = torch.tensor([0.5, 2.0], dtype=torch.bfloat16).reshape(2, 1, 1)
+        key = "model.layers.0.mlp.experts.gate_up_proj"
+        state_dict = {
+            key: bank,
+            f"{key}_scale_inv": scale,
+            f"{key}_activation_scale": torch.ones(2, dtype=torch.bfloat16),
+        }
+        result = _dequantize_fp8_weights(state_dict)
+        assert set(result) == {key}
+        assert torch.allclose(result[key], bank.to(torch.bfloat16) * scale)
+
     def test_suffix_replace_not_greedy(self):
         """The scale key derivation uses suffix replacement, not global replace.
 

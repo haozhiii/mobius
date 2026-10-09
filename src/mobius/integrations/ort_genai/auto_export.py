@@ -1222,6 +1222,11 @@ def _write_vision_processor_config(
                         size = ip.size
                         if isinstance(size, int):
                             image_size = size
+                        elif is_pixtral and _size_mapping(size).get("longest_edge"):
+                            # Pixtral's longest_edge is a side length (1540 px);
+                            # smart-resize bounds the area, so square it.
+                            image_size = int(_size_mapping(size)["longest_edge"])
+                            max_pixels = image_size * image_size
                         else:
                             size = _size_mapping(size)
                             # Qwen-style processors encode shortest_edge and
