@@ -48,6 +48,17 @@ from mobius.models.base import (
 
 _LAYER_TYPES = frozenset({"full_attention", "sliding_attention"})
 
+# Laguna-S puts massive activations on the BOS (attention-sink) token: its
+# routed-expert sum reaches ~7.8e4 in layer 46 and its residual ~8.6e5 in
+# layer 47, past the float16 maximum of 65504. Float16 graphs therefore keep
+# the residual stream and the RMSNorms in float32, and run QMoE with router
+# weights divided by this power of two, multiplying back after the Cast.
+_FP16_MOE_OUTPUT_SCALE = 8.0
+
+
+def _float32_residual(config: ArchitectureConfig) -> bool:
+    return config.dtype == ir.DataType.FLOAT16
+
 
 def _layer_types(config: LagunaConfig) -> list[str]:
     kinds = list(config.layer_types or ["full_attention"] * config.num_hidden_layers)
@@ -125,14 +136,14 @@ class LagunaAttention(Attention):
 class LagunaTopKGate(nn.Module):
     """Sigmoid top-k router. The correction bias changes which experts are chosen only."""
 
-    def __init__(self, config: LagunaConfig):
+    def __init__(self, config: LagunaConfig, weight_scale: float = 1.0):
         super().__init__()
         assert config.num_local_experts is not None
         assert config.num_experts_per_tok is not None
         self.num_experts = config.num_local_experts
         self.top_k = config.num_experts_per_tok
         self.norm_topk_prob = config.norm_topk_prob
-        self.routed_scaling_factor = config.routed_scaling_factor
+        self.routed_scaling_factor = config.routed_scaling_factor * weight_scale
         self.softcap = config.router_logit_softcapping
         self.weight = nn.Parameter([self.num_experts, config.hidden_size])
         self.weight._keep_float32 = True  # type: ignore[attr-defined]
@@ -189,6 +200,7 @@ class LagunaSparseMoeBlock(MoELayer):
 
     An INT4 config that matches the QMoE ABI packs the routed experts into one
     ``com.microsoft.QMoE`` node. Otherwise every expert is a separate MLP.
+    Float16 graphs return the sum in float32.
     """
 
     def __init__(self, config: LagunaConfig, linear_class: type | None):
@@ -196,7 +208,9 @@ class LagunaSparseMoeBlock(MoELayer):
             raise ValueError("Laguna MoE layers require moe_intermediate_size.")
         if config.shared_expert_intermediate_size is None:
             raise ValueError("Laguna MoE layers require shared_expert_intermediate_size.")
-        super().__init__(config, gate=LagunaTopKGate(config), linear_class=linear_class)
+        self._output_scale = _FP16_MOE_OUTPUT_SCALE if _float32_residual(config) else None
+        gate = LagunaTopKGate(config, 1.0 / (self._output_scale or 1.0))
+        super().__init__(config, gate=gate, linear_class=linear_class)
         shared_config = dataclasses.replace(
             config, intermediate_size=config.shared_expert_intermediate_size
         )
@@ -204,7 +218,37 @@ class LagunaSparseMoeBlock(MoELayer):
 
     def forward(self, op: OpBuilder, hidden_states: ir.Value):
         routed = super().forward(op, hidden_states)
-        return op.Add(routed, self.shared_expert(op, hidden_states))
+        shared = self.shared_expert(op, hidden_states)
+        if self._output_scale is None:
+            return op.Add(routed, shared)
+        routed = op.Mul(
+            op.Cast(routed, to=ir.DataType.FLOAT),
+            op.Constant(value_float=self._output_scale),
+        )
+        return op.Add(routed, op.Cast(shared, to=ir.DataType.FLOAT))
+
+
+class _Float32RMSNorm(RMSNorm):
+    """RMSNorm over a float32 residual whose output is cast to the model dtype."""
+
+    def __init__(self, hidden_size: int, eps: float, dtype: ir.DataType):
+        super().__init__(hidden_size, eps=eps)
+        self._dtype = dtype
+
+    def forward(self, op: OpBuilder, hidden_states: ir.Value):
+        normed = op.RMSNormalization(
+            hidden_states,
+            op.Cast(self.weight, to=ir.DataType.FLOAT),
+            epsilon=self.variance_epsilon,
+            axis=-1,
+        )
+        return op.Cast(normed, to=self._dtype)
+
+
+def _rms_norm(config: LagunaConfig) -> RMSNorm:
+    if _float32_residual(config):
+        return _Float32RMSNorm(config.hidden_size, config.rms_norm_eps, config.dtype)
+    return RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
 
 class LagunaDecoderLayer(nn.Module):
@@ -240,8 +284,8 @@ class LagunaDecoderLayer(nn.Module):
             self.mlp = LagunaSparseMoeBlock(moe_config, linear_class=linear_class)
         else:
             self.mlp = MLP(config, linear_class=linear_class)
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.input_layernorm = _rms_norm(config)
+        self.post_attention_layernorm = _rms_norm(config)
 
     def forward(
         self,
@@ -259,10 +303,10 @@ class LagunaDecoderLayer(nn.Module):
             position_embeddings,
             past_key_value,
         )
-        hidden_states = op.Add(residual, attn_out)
+        hidden_states = op.Add(residual, op.CastLike(attn_out, residual))
         residual = hidden_states
         hidden_states = self.mlp(op, self.post_attention_layernorm(op, hidden_states))
-        return op.Add(residual, hidden_states), present_kv
+        return op.Add(residual, op.CastLike(hidden_states, residual)), present_kv
 
 
 def _rope_module(config: LagunaConfig, *, sliding: bool) -> nn.Module:
@@ -296,7 +340,7 @@ class LagunaTextModel(nn.Module):
                 for index, kind in enumerate(self._layer_types)
             ]
         )
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = _rms_norm(config)
         kinds = set(self._layer_types)
         self.full_rotary_emb = (
             _rope_module(config, sliding=False) if "full_attention" in kinds else None
@@ -314,6 +358,8 @@ class LagunaTextModel(nn.Module):
         past_key_values: list | None = None,
     ):
         hidden_states = self.embed_tokens(op, input_ids)
+        if _float32_residual(self.config):
+            hidden_states = op.Cast(hidden_states, to=ir.DataType.FLOAT)
         embeddings: dict[str, tuple] = {}
         if self.full_rotary_emb is not None:
             embeddings["full_attention"] = self.full_rotary_emb(op, position_ids)

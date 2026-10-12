@@ -106,7 +106,14 @@ def _to_hub_layout(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tenso
     return result
 
 
-def _run(model: ir.Model, config: LagunaConfig, input_ids, position_ids, past=None):
+def _run(
+    model: ir.Model,
+    config: LagunaConfig,
+    input_ids,
+    position_ids,
+    past=None,
+    kv_dtype=np.float32,
+):
     batch = input_ids.shape[0]
     feeds = {
         "input_ids": input_ids,
@@ -119,7 +126,7 @@ def _run(model: ir.Model, config: LagunaConfig, input_ids, position_ids, past=No
                 past[f"present.{layer}.{kind}"]
                 if past is not None
                 else np.zeros(
-                    (batch, config.num_key_value_heads, 0, config.head_dim), dtype=np.float32
+                    (batch, config.num_key_value_heads, 0, config.head_dim), dtype=kv_dtype
                 )
             )
     session = ort.InferenceSession(
@@ -229,6 +236,72 @@ def test_fp32_prefill_and_decode_match_transformers(hub_layout: bool) -> None:
 
 
 _BLOCK = 16
+_OLIVE_INT4 = {
+    "quant_method": "olive",
+    "bits": 4,
+    "group_size": _BLOCK,
+    "symmetric": True,
+    "lm_head": False,
+    "embeds": False,
+}
+
+
+def _routed_expert_peaks(hf_model, input_ids: np.ndarray, layer: int) -> tuple[float, float]:
+    """Largest single-expert output and largest scaled routed sum in one MoE layer."""
+    captured = {}
+    mlp = hf_model.model.layers[layer].mlp
+    handle = mlp.register_forward_pre_hook(lambda _m, args: captured.update(x=args[0]))
+    with torch.no_grad():
+        hf_model(torch.from_numpy(input_ids))
+        handle.remove()
+        x = captured["x"].reshape(-1, captured["x"].shape[-1])
+        _, weights, selected = mlp.gate(x)
+        experts = mlp.experts
+        peak, routed = 0.0, torch.zeros_like(x)
+        for slot in range(selected.shape[1]):
+            for expert in selected[:, slot].unique().tolist():
+                rows = (selected[:, slot] == expert).nonzero()[:, 0]
+                gate, up = (x[rows] @ experts.gate_up_proj[expert].T).chunk(2, dim=-1)
+                out = (experts.act_fn(gate) * up) @ experts.down_proj[expert].T
+                peak = max(peak, float(out.abs().max()))
+                routed[rows] += out * weights[rows, slot, None]
+    return peak, float(routed.abs().max()) * mlp.routed_scaling_factor
+
+
+def test_fp16_survives_routed_sum_beyond_fp16_range() -> None:
+    """Laguna-S's BOS token sums its routed experts past 65504 in a non-final layer."""
+    hf_config = _hf_config(moe_routed_scaling_factor=8.0)
+    hf_model = _hf_model(hf_config)
+    rng = np.random.default_rng(1)
+    input_ids = rng.integers(1, hf_config.vocab_size, size=(1, 8)).astype(np.int64)
+    checkpoint = _olive_checkpoint(hf_model)
+    _, routed = _routed_expert_peaks(hf_model, input_ids, layer=2)
+    with torch.no_grad():
+        hf_model.model.layers[2].mlp.experts.down_proj.mul_(1e5 / routed)
+    checkpoint["model.layers.2.mlp.experts.down_proj_scales"] *= 1e5 / routed
+    peak, routed = _routed_expert_peaks(hf_model, input_ids, layer=2)
+    assert peak < 65504 < routed
+
+    hf_config.quantization_config = _OLIVE_INT4
+    config = LagunaConfig.from_transformers(hf_config)
+    config.dtype = ir.DataType.FLOAT16
+    module = LagunaCausalLMModel(config)
+    model = build_from_module(module, config, task="text-generation")["model"]
+    assert [node.op_type for node in model.graph].count("QMoE") == 3
+    apply_weights(model, module.preprocess_weights(checkpoint))
+    with torch.no_grad():
+        expected = hf_model(torch.from_numpy(input_ids)).logits.numpy()
+
+    seq = input_ids.shape[1] - 1
+    prefill = _run(
+        model, config, input_ids[:, :seq], np.arange(seq)[None, :], kv_dtype=np.float16
+    )
+    decode = _run(
+        model, config, input_ids[:, seq:], np.array([[seq]]), past=prefill, kv_dtype=np.float16
+    )
+    actual = np.concatenate([prefill["logits"], decode["logits"]], axis=1).astype(np.float32)
+    assert np.isfinite(actual).all()
+    np.testing.assert_allclose(actual, expected, rtol=0, atol=2e-2 * np.abs(expected).max())
 
 
 def _quantize_rtn(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -269,14 +342,7 @@ def test_int4_olive_checkpoint_matches_dequantized_transformers() -> None:
     hf_config = _hf_config()
     hf_model = _hf_model(hf_config)
     checkpoint = _olive_checkpoint(hf_model)
-    hf_config.quantization_config = {
-        "quant_method": "olive",
-        "bits": 4,
-        "group_size": _BLOCK,
-        "symmetric": True,
-        "lm_head": False,
-        "embeds": False,
-    }
+    hf_config.quantization_config = _OLIVE_INT4
     config = LagunaConfig.from_transformers(hf_config)
     assert config.quantization is not None
     config.dtype = ir.DataType.FLOAT
