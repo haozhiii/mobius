@@ -47,6 +47,7 @@ from mobius._configs import (
     Plamo2Config,
     Qwen4ExpConfig,
     SenseNovaU1Config,
+    Step3p5Config,
     VibeVoiceASRConfig,
     VibeVoiceASRStreamingConfig,
     VibeVoiceConfig,
@@ -163,6 +164,7 @@ from mobius.models import (
     SmallThinkerGGUFCausalLMModel,
     SmolLM3CausalLMModel,
     SortformerDiarizationModel,
+    Step3p5CausalLMModel,
     VibeVoiceASRForConditionalGeneration,
     VibeVoiceASRStreamingForConditionalGeneration,
     VibeVoiceForConditionalGeneration,
@@ -707,6 +709,7 @@ _REGISTRATIONS: dict[str, ModelRegistration] = {
         variant="gguf",
     ),
     "smollm3": ModelRegistration(SmolLM3CausalLMModel),
+    "step3p5": ModelRegistration(Step3p5CausalLMModel, config_class=Step3p5Config),
     "stablelm": ModelRegistration(LayerNormCausalLMModel),
     "starcoder2": ModelRegistration(StarCoder2CausalLMModel),
     # --- Mixture of Experts ---

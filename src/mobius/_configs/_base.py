@@ -2776,6 +2776,180 @@ class HyV3MtpConfig(HyV3Config):
     use_dedicated_lm_head: bool = False
 
 
+class _AttrView:
+    """Read-through config view with a few fields replaced."""
+
+    def __init__(self, base, **overrides):
+        object.__setattr__(self, "_base", base)
+        object.__setattr__(self, "_overrides", overrides)
+
+    def __getattr__(self, name):
+        if name in self._overrides:
+            return self._overrides[name]
+        return getattr(self._base, name)
+
+
+def _step3p5_layer_value(layer_types: list[str], values: list, kind: str, default: float) -> float:
+    picked = [
+        values[index]
+        for index, layer_type in enumerate(layer_types)
+        if layer_type == kind and index < len(values)
+    ]
+    if not picked:
+        return default
+    first = float(picked[0])
+    if any(not math.isclose(float(value), first) for value in picked):
+        raise ValueError(f"Step3p5 {kind} layers disagree on a per-layer value: {picked}.")
+    return first
+
+
+@dataclasses.dataclass
+class Step3p5Config(CausalLMConfig):
+    """Configuration for the Step-3.5-Flash decoder.
+
+    Full-attention and sliding-attention layers do not share a head count or
+    a RoPE table. ``yarn_on_full_attention`` applies ``rope_scaling`` only to
+    the full-attention table. ``0`` in a SwiGLU limit list means no clamp.
+    """
+
+    sliding_num_attention_heads: int | None = None
+    sliding_num_key_value_heads: int | None = None
+    full_partial_rotary_factor: float = 0.5
+    sliding_partial_rotary_factor: float = 1.0
+    full_rope_theta: float | None = None
+    sliding_rope_theta: float = 10_000.0
+    yarn_on_full_attention: bool = False
+    moe_layer_indices: list[int] | None = None
+    swiglu_limits: list[float] | None = None
+    swiglu_limits_shared: list[float] | None = None
+    use_head_wise_attn_gate: bool = True
+    num_nextn_predict_layers: int = 0
+
+    @classmethod
+    def from_transformers(cls, config, parent_config=None) -> Step3p5Config:
+        num_layers = int(config.num_hidden_layers)
+        extra = int(getattr(config, "num_nextn_predict_layers", 0) or 0)
+        layer_types = list(getattr(config, "layer_types", None) or [])
+        if len(layer_types) == num_layers + extra:
+            layer_types = layer_types[:num_layers]
+        if not layer_types:
+            layer_types = [
+                "full_attention" if index % 4 == 0 else "sliding_attention"
+                for index in range(num_layers)
+            ]
+        if len(layer_types) != num_layers:
+            raise ValueError(
+                "Step3p5 layer_types must match num_hidden_layers after MTP entries "
+                f"are removed, got {len(layer_types)} for {num_layers} layers."
+            )
+
+        raw_theta = getattr(config, "rope_theta", 10_000.0)
+        thetas = list(raw_theta) if isinstance(raw_theta, (list, tuple)) else [float(raw_theta)] * num_layers
+        raw_factors = getattr(config, "partial_rotary_factors", None) or [1.0] * num_layers
+        factors = list(raw_factors)
+        full_theta = _step3p5_layer_value(layer_types, thetas, "full_attention", 5_000_000.0)
+        sliding_theta = _step3p5_layer_value(layer_types, thetas, "sliding_attention", 10_000.0)
+        full_factor = _step3p5_layer_value(layer_types, factors, "full_attention", 0.5)
+        sliding_factor = _step3p5_layer_value(layer_types, factors, "sliding_attention", 1.0)
+
+        num_heads = int(config.num_attention_heads)
+        kv_heads = int(
+            getattr(config, "num_attention_groups", None)
+            or getattr(config, "num_key_value_heads", None)
+            or num_heads
+        )
+        top_k = int(
+            getattr(config, "moe_top_k", None)
+            or getattr(config, "num_experts_per_tok", None)
+            or 8
+        )
+        view = _AttrView(
+            config,
+            rope_theta=full_theta,
+            partial_rotary_factor=full_factor,
+            num_key_value_heads=kv_heads,
+            num_experts_per_tok=top_k,
+            routed_scaling_factor=float(
+                getattr(config, "moe_router_scaling_factor", None)
+                or getattr(config, "routed_scaling_factor", 1.0)
+            ),
+            norm_topk_prob=bool(
+                getattr(config, "norm_expert_weight", getattr(config, "norm_topk_prob", True))
+            ),
+            hidden_act="silu",
+            rms_norm_eps=float(getattr(config, "rms_norm_eps", None) or 1e-5),
+            layer_types=layer_types,
+        )
+        base = ArchitectureConfig.from_transformers(view, parent_config)
+        fields = _shallow_fields(base)
+
+        def _limits(name: str) -> list[float] | None:
+            raw = getattr(config, name, None)
+            if raw is None:
+                return None
+            return [float(value) for value in list(raw)[:num_layers]]
+
+        raw_moe = getattr(config, "moe_layers_enum", None)
+        if isinstance(raw_moe, str):
+            moe_layers = [int(part) for part in raw_moe.split(",") if part.strip()]
+        elif isinstance(raw_moe, (list, tuple)):
+            moe_layers = [int(part) for part in raw_moe]
+        else:
+            moe_layers = list(range(1, num_layers))
+        moe_layers = [index for index in moe_layers if index < num_layers]
+        contiguous = bool(moe_layers) and moe_layers == list(range(moe_layers[0], num_layers))
+        other = getattr(config, "attention_other_setting", None) or {}
+        sliding_kv = other.get("num_attention_groups", other.get("num_key_value_heads"))
+        shared = (
+            getattr(config, "share_expert_dim", None)
+            or getattr(config, "share_expert_dims", None)
+            or fields.get("shared_expert_intermediate_size")
+            or fields.get("moe_intermediate_size")
+        )
+        yarn_types = set(getattr(config, "yarn_only_types", None) or [])
+        fields.update(
+            layer_types=layer_types,
+            attn_qk_norm=True,
+            attn_qk_norm_full=False,
+            attn_qkv_bias=False,
+            attn_o_bias=False,
+            hidden_act="silu",
+            rms_norm_eps=float(getattr(config, "rms_norm_eps", None) or 1e-5),
+            num_key_value_heads=kv_heads,
+            num_experts_per_tok=top_k,
+            shared_expert_intermediate_size=int(shared) if shared is not None else None,
+            routed_scaling_factor=float(
+                getattr(config, "moe_router_scaling_factor", None) or fields["routed_scaling_factor"]
+            ),
+            norm_topk_prob=bool(
+                getattr(config, "norm_expert_weight", getattr(config, "norm_topk_prob", True))
+            ),
+            use_expert_bias=bool(getattr(config, "use_moe_router_bias", True)),
+            scoring_func="sigmoid",
+            first_k_dense_replace=moe_layers[0] if contiguous else 0,
+            moe_layer_indices=None if contiguous or not moe_layers else moe_layers,
+            sliding_num_attention_heads=int(
+                other.get("num_attention_heads", fields["num_attention_heads"])
+            ),
+            sliding_num_key_value_heads=int(sliding_kv) if sliding_kv is not None else kv_heads,
+            full_partial_rotary_factor=full_factor,
+            sliding_partial_rotary_factor=sliding_factor,
+            full_rope_theta=full_theta,
+            sliding_rope_theta=sliding_theta,
+            yarn_on_full_attention=(
+                "full_attention" in yarn_types and bool(getattr(config, "rope_scaling", None))
+            ),
+            swiglu_limits=_limits("swiglu_limits"),
+            swiglu_limits_shared=_limits("swiglu_limits_shared"),
+            use_head_wise_attn_gate=bool(getattr(config, "use_head_wise_attn_gate", True)),
+            num_nextn_predict_layers=extra,
+        )
+        if not moe_layers:
+            fields["first_k_dense_replace"] = num_layers
+            fields["moe_layer_indices"] = None
+        return cls(**fields)
+
+
 def _speculators_layer_namespace(layer_cfg: dict):
     """Build a config-like namespace from a speculators ``transformer_layer_config``.
 

@@ -203,6 +203,7 @@ __all__ = [
     "SmallThinkerGGUFCausalLMModel",
     "SmolLM3CausalLMModel",
     "StarCoder2CausalLMModel",
+    "Step3p5CausalLMModel",
     "T2IAdapterModel",
     "T5ForConditionalGeneration",
     "T5EncoderModel",
@@ -450,6 +451,7 @@ from mobius.models.smallthinker import SmallThinkerGGUFCausalLMModel
 from mobius.models.smollm import SmolLM3CausalLMModel
 from mobius.models.sortformer import SortformerConfig, SortformerDiarizationModel
 from mobius.models.starcoder2 import StarCoder2CausalLMModel
+from mobius.models.step3p5 import Step3p5CausalLMModel
 from mobius.models.t5 import T5EncoderModel, T5ForConditionalGeneration
 from mobius.models.talkie import TalkieForCausalLM
 from mobius.models.unet import (

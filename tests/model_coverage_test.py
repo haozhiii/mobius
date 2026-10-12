@@ -349,6 +349,12 @@ _COVERAGE_SKIP: dict[str, str] = {
     "checkpoint; dedicated unit and synthetic parity tests cover its graph and "
     "weight paths.",
     "llama4_text": "Very large MoE (109B) — no small public checkpoint",
+    "step3p5": (
+        "Step-3.5-Flash is a 196B MoE (288 experts). A full-config graph unrolls "
+        "every expert, and there is no small public checkpoint. L1 and "
+        "src/mobius/models/step3p5_test.py cover the export graph; MTP heads "
+        "are not exported."
+    ),
     "orion": "Orion's public checkpoint is 14B; L1 graph/config/tensor closure is "
     "covered, but no small public artifact exists for bounded L4/L5 validation.",
     "maincoder": "Maincoder's pinned L2 source config and dedicated GGUF graph/value/cache "

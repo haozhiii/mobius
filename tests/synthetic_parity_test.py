@@ -68,6 +68,11 @@ _SKIP_REASONS: dict[str, str] = {
     "minicpm3": "HF AutoConfig does not recognize minicpm3 (requires trust_remote_code)",
     "baichuan": "HF AutoConfig does not recognize baichuan (requires trust_remote_code)",
     "arctic": "HF AutoConfig does not recognize arctic (requires trust_remote_code)",
+    "step3p5": (
+        "Hub Step-3.5-Flash uses custom modeling code. The in-tree step3p5 "
+        "alias is Step3p7, which is a different block. Parity is covered by "
+        "src/mobius/models/step3p5_test.py."
+    ),
     "ernie4_5": "HF ernie4_5 model requires special fields not in our standard test infra",
     # Mamba2 standalone model: HF creates different architecture
     "mamba2": "HF Mamba2 standalone is not a causal LM model",
