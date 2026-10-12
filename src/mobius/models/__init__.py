@@ -102,6 +102,7 @@ __all__ = [
     "JetMoeCausalLMModel",
     "KimiK3CausalLMModel",
     "KimiLinearCausalLMModel",
+    "LagunaCausalLMModel",
     "Llama4CausalLMModel",
     "LlamaEmbedGGUFModel",
     "DreamModel",
@@ -316,6 +317,7 @@ from mobius.models.jamba import JambaCausalLMModel
 from mobius.models.jetmoe import JetMoeCausalLMModel
 from mobius.models.kimi_k3 import KimiK3CausalLMModel
 from mobius.models.kimi_linear import KimiLinearCausalLMModel
+from mobius.models.laguna import LagunaCausalLMModel
 from mobius.models.legacy_decoder import (
     CodeShellCausalLMModel,
     Jais2CausalLMModel,

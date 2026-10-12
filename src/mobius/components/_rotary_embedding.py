@@ -377,7 +377,10 @@ class YarnRope(BaseRope):
                 return 1.0
             return 0.1 * ms * math.log(scale) + 1.0
 
-        if mscale and mscale_all_dim:
+        attention_factor = rope_scaling.get("attention_factor")
+        if attention_factor is not None:
+            attention_factor = float(attention_factor)
+        elif mscale and mscale_all_dim:
             attention_factor = float(
                 get_mscale(factor, mscale) / get_mscale(factor, mscale_all_dim)
             )

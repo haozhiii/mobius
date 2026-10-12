@@ -68,6 +68,10 @@ _SKIP_REASONS: dict[str, str] = {
     "minicpm3": "HF AutoConfig does not recognize minicpm3 (requires trust_remote_code)",
     "baichuan": "HF AutoConfig does not recognize baichuan (requires trust_remote_code)",
     "arctic": "HF AutoConfig does not recognize arctic (requires trust_remote_code)",
+    "laguna": (
+        "HF Laguna nests RoPE parameters per layer type, which the flat tiny "
+        "config cannot express. Parity is covered by src/mobius/models/laguna_test.py."
+    ),
     "ernie4_5": "HF ernie4_5 model requires special fields not in our standard test infra",
     # Mamba2 standalone model: HF creates different architecture
     "mamba2": "HF Mamba2 standalone is not a causal LM model",

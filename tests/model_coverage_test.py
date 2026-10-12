@@ -349,6 +349,11 @@ _COVERAGE_SKIP: dict[str, str] = {
     "checkpoint; dedicated unit and synthetic parity tests cover its graph and "
     "weight paths.",
     "llama4_text": "Very large MoE (109B) — no small public checkpoint",
+    "laguna": (
+        "Laguna checkpoints are 33B-225B MoEs with no small public artifact. "
+        "src/mobius/models/laguna_test.py compares random-weight fp32 and INT4 "
+        "QMoE graphs against Transformers' native laguna model."
+    ),
     "orion": "Orion's public checkpoint is 14B; L1 graph/config/tensor closure is "
     "covered, but no small public artifact exists for bounded L4/L5 validation.",
     "maincoder": "Maincoder's pinned L2 source config and dedicated GGUF graph/value/cache "

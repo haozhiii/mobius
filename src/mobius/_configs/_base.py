@@ -2776,6 +2776,140 @@ class HyV3MtpConfig(HyV3Config):
     use_dedicated_lm_head: bool = False
 
 
+_LAGUNA_GATING = {
+    True: "per_head",
+    "per-head": "per_head",
+    "per_head": "per_head",
+    "per-element": "per_element",
+    "per_element": "per_element",
+}
+
+
+def _laguna_rope_tables(config) -> tuple[dict, dict]:
+    """Return the (full-attention, sliding-attention) RoPE parameter dicts.
+
+    ``rope_parameters`` is either keyed by layer type (Transformers >= 5) or
+    flat, with the sliding table in ``swa_rope_parameters`` (hub remote code).
+    Without a sliding table the sliding layers reuse the full-attention one.
+    """
+    raw = dict(getattr(config, "rope_parameters", None) or {})
+    if isinstance(raw.get("full_attention"), Mapping):
+        full = dict(raw["full_attention"])
+        sliding = raw.get("sliding_attention")
+    else:
+        full = raw
+        sliding = None
+    if sliding is None:
+        sliding = getattr(config, "swa_rope_parameters", None)
+    sliding = dict(sliding) if sliding is not None else dict(full)
+    top_partial = getattr(config, "partial_rotary_factor", None)
+    for table in (full, sliding):
+        table.setdefault("rope_type", "default")
+        table.setdefault("rope_theta", 500_000.0)
+        if table.get("partial_rotary_factor") is None:
+            table["partial_rotary_factor"] = 1.0 if top_partial is None else top_partial
+    return full, sliding
+
+
+@dataclasses.dataclass
+class LagunaConfig(CausalLMConfig):
+    """Configuration for the Poolside Laguna decoder (``model_type=laguna``).
+
+    Full- and sliding-attention layers carry separate RoPE tables
+    (``rope_*`` for full, ``sliding_rope_*`` for sliding) and may differ in
+    query head count (``num_attention_heads_per_layer``). ``attn_output_gate``
+    is ``"per_head"``, ``"per_element"`` or ``None``.
+    """
+
+    num_attention_heads_per_layer: list[int] | None = None
+    dense_layer_indices: list[int] | None = None
+    attn_output_gate: str | None = "per_head"
+    sliding_rope_type: str = "default"
+    sliding_rope_theta: float = 10_000.0
+    sliding_partial_rotary_factor: float = 1.0
+    sliding_rope_scaling: dict | None = None
+    router_logit_softcapping: float = 0.0
+
+    @classmethod
+    def from_transformers(cls, config, parent_config=None) -> LagunaConfig:
+        if getattr(config, "moe_apply_router_weight_on_input", False):
+            raise NotImplementedError(
+                "Laguna moe_apply_router_weight_on_input is not supported."
+            )
+        if getattr(config, "swa_attention_sink_enabled", False):
+            raise NotImplementedError(
+                "Laguna sliding-window attention sinks are not supported."
+            )
+        gating = getattr(config, "gating", True)
+        if gating is False or gating is None:
+            attn_output_gate = None
+        elif gating in _LAGUNA_GATING:
+            attn_output_gate = _LAGUNA_GATING[gating]
+        else:
+            raise ValueError(f"Unsupported Laguna gating mode {gating!r}.")
+
+        base = ArchitectureConfig.from_transformers(config, parent_config)
+        fields = _shallow_fields(base)
+        num_layers = int(base.num_hidden_layers)
+        full, sliding = _laguna_rope_tables(config)
+
+        mlp_layer_types = getattr(config, "mlp_layer_types", None)
+        num_experts = int(getattr(config, "num_experts", None) or 0)
+        if mlp_layer_types is not None:
+            dense = [
+                i for i, kind in enumerate(mlp_layer_types[:num_layers]) if kind != "sparse"
+            ]
+        else:
+            mlp_only = set(getattr(config, "mlp_only_layers", None) or ())
+            step = int(getattr(config, "decoder_sparse_step", None) or 1)
+            dense = [
+                i
+                for i in range(num_layers)
+                if i in mlp_only or num_experts <= 0 or (i + 1) % step != 0
+            ]
+
+        heads = getattr(config, "num_attention_heads_per_layer", None)
+        if heads is not None:
+            heads = [int(h) for h in list(heads)[:num_layers]]
+            if len(heads) != num_layers:
+                raise ValueError(
+                    f"Laguna num_attention_heads_per_layer has {len(heads)} entries "
+                    f"for {num_layers} layers."
+                )
+
+        def _scaling(table: dict) -> dict | None:
+            return None if table["rope_type"] == "default" else table
+
+        fields.update(
+            rope_type=full["rope_type"],
+            rope_theta=float(full["rope_theta"]),
+            rope_scaling=_scaling(full),
+            partial_rotary_factor=float(full["partial_rotary_factor"]),
+            original_max_position_embeddings=full.get("original_max_position_embeddings"),
+            sliding_rope_type=sliding["rope_type"],
+            sliding_rope_theta=float(sliding["rope_theta"]),
+            sliding_partial_rotary_factor=float(sliding["partial_rotary_factor"]),
+            sliding_rope_scaling=_scaling(sliding),
+            num_attention_heads_per_layer=heads,
+            dense_layer_indices=dense,
+            first_k_dense_replace=0,
+            attn_output_gate=attn_output_gate,
+            attn_qk_norm=True,
+            attn_qk_norm_full=False,
+            attn_qkv_bias=False,
+            attn_o_bias=False,
+            num_local_experts=num_experts or None,
+            routed_scaling_factor=float(getattr(config, "moe_routed_scaling_factor", 1.0)),
+            norm_topk_prob=bool(getattr(config, "norm_topk_prob", True)),
+            scoring_func="sigmoid",
+            use_expert_bias=True,
+            router_logit_softcapping=float(
+                getattr(config, "moe_router_logit_softcapping", 0.0) or 0.0
+            ),
+        )
+        return cls(**fields)
+
+
 def _speculators_layer_namespace(layer_cfg: dict):
     """Build a config-like namespace from a speculators ``transformer_layer_config``.
 
